@@ -1,0 +1,479 @@
+unit Unit17;
+
+interface
+
+uses
+  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
+  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Vcl.ExtCtrls,
+  Vcl.WinXCtrls, Vcl.ComCtrls, VclTee.TeeGDIPlus, VCLTee.Series,
+  VCLTee.TeEngine, VCLTee.TeeProcs, VCLTee.Chart, System.Math;
+
+type
+  PRGBTripleArray = ^TRGBTripleArray;
+  TRGBTripleArray = array[0..32767] of TRGBTriple;
+
+  TForm17 = class(TForm)
+    PageControl1: TPageControl;
+    TabSheet1: TTabSheet;
+    GroupBox1: TGroupBox;
+    GroupBox2: TGroupBox;
+    GroupBox3: TGroupBox;
+    GroupBox4: TGroupBox;
+    Chart1: TChart; // Assuming SignalTD and SignalFD are on this chart or separate charts
+    Chart2: TChart;
+    Label1: TLabel;
+    Label2: TLabel;
+    Label3: TLabel;
+    Label4: TLabel;
+    Label5: TLabel;
+    Label6: TLabel;
+    Label7: TLabel;
+    Label8: TLabel;
+    LogBox: TListBox;
+    Signal1FEdit: TEdit;
+    Signal2FEdit: TEdit;
+    SignalSwitchEdit: TEdit;
+    SignalNEdit: TEdit;
+    WaveletFEdit: TEdit;
+    FSEdit: TEdit;
+    GenSignal: TButton;
+    GenWavelet: TButton;
+    LoadCSV: TButton;
+    SignalTD: TLineSeries;  // Time Domain signal
+    SignalFD: TBarSeries;   // Frequency Domain signal (DFT magnitude)
+    TranslationTrackBar: TTrackBar;
+    ScaleTrackBar: TTrackBar;
+    GroupBox5: TGroupBox;
+    HeatMapImage: TImage;
+    ScaleImage: TImage;
+    GroupBox6: TGroupBox;
+    SampleCount: TEdit;
+    Label11: TLabel;
+    MaxLabel: TLabel;
+    MinLabel: TLabel;
+    Chart3: TChart;
+    Wavelet3: TLineSeries;
+    Wavelet1: TLineSeries;
+    Wavelet2: TLineSeries;
+    ApplyCWT: TButton;
+    Timer1: TTimer;
+    GroupBox7: TGroupBox;
+    Label9: TLabel;
+    Label10: TLabel;
+    GroupBox8: TGroupBox;
+    OpenDialog1: TOpenDialog;
+
+    procedure LogMsg(const Msg: string);
+    procedure GenWaveletClick(Sender: TObject);
+    procedure DFT(const inputdft: TArray<Double>; sampleratedft: Double; out freqAxisdft, magnitudeAxisDFT: TArray<Double>);
+    procedure FormCreate(Sender: TObject);
+    procedure GenSignalClickEvent(Sender: TObject);
+    procedure WaveletFEditChange(Sender: TObject);
+    procedure ScaleTrackBarChange(Sender: TObject);
+    procedure TranslationTrackBarChange(Sender: TObject);
+    procedure RainbowColor(Value: Real; out R, G, B: Byte);
+    procedure PerformCWTAndPlot;
+    procedure ButtonPerformCWTClick(Sender: TObject);
+    procedure LoadCSVClick(Sender: TObject);
+  private
+    FPi_pow_neg_0_25: Double;
+    procedure UpdateMotherWaveletPlot;
+  public
+    { Public declarations }
+  end;
+
+var
+  Form17: TForm17;
+
+const
+  MORLET_CHART_POINTS = 1000;
+  CWT_ROW_COUNT    = 100;
+  CWT_COLUMN_COUNT = 100;
+  CWT_F0           = 0.849;
+  CWT_A_INITIAL    = 0.0019;
+  CWT_A_INCREMENT  = 0.00091;
+
+  HEATMAP_BITMAP_WIDTH = 270;
+  HEATMAP_BITMAP_HEIGHT = 270;
+  SCALEIMAGE_BITMAP_WIDTH = 35;
+  SCALEIMAGE_BITMAP_HEIGHT = 270;
+
+implementation
+
+{$R *.dfm}
+
+procedure TForm17.FormCreate(Sender: TObject);
+begin
+  Self.FPi_pow_neg_0_25 := 0.755262475881554;
+
+  ScaleTrackBar.Min := 10;
+  ScaleTrackBar.Max := 200;
+  ScaleTrackBar.Position := 50;
+  Label7.Caption := 'Scale: ' + IntToStr(ScaleTrackBar.Position);
+
+  TranslationTrackBar.Min := 0;
+  TranslationTrackBar.Max := MORLET_CHART_POINTS;
+  TranslationTrackBar.Position := MORLET_CHART_POINTS div 2;
+  Label8.Caption := 'Translation: ' + IntToStr(TranslationTrackBar.Position);
+
+  UpdateMotherWaveletPlot;
+end;
+
+procedure TForm17.LoadCSVClick(Sender: TObject);
+var
+  i, pointsToRead: Integer;
+  textFileHandle: TextFile;
+  colN, colV2: Extended;
+  signalY: Extended;
+  tempSignalData: TArray<Double>;
+  samplingRateDFT: Double;
+  freqAxis, magnitudeAxis: TArray<Double>;
+begin
+  // 1. Clear previous data - Assuming components are always assigned
+  SignalTD.Clear;
+  SignalFD.Clear;
+  HeatMapImage.Picture.Graphic := nil; // Assumes HeatMapImage.Picture is assigned
+  MinLabel.Caption := 'Min:';
+  MaxLabel.Caption := 'Max:';
+
+  // Assume OpenDialog1 is assigned and Execute will be successful (user selects a file)
+  if OpenDialog1.Execute then // Keep this one essential check for user interaction
+  begin
+    AssignFile(textFileHandle, OpenDialog1.FileName);
+    try
+      Reset(textFileHandle);
+
+      ReadLn(textFileHandle); // Skip first header line
+      ReadLn(textFileHandle); // Skip second header line
+
+      pointsToRead := StrToInt(SampleCount.Text); // Assume valid positive integer
+
+      SignalTD.Title := 'Loaded Signal';
+      SetLength(tempSignalData, pointsToRead);
+
+      for i := 0 to pointsToRead - 1 do // Loop to read specified number of points
+      begin
+        // Assume file has enough lines and correct format
+        ReadLn(textFileHandle, colN, signalY, colV2);
+        SignalTD.AddXY(i, signalY);
+        tempSignalData[i] := signalY;
+      end;
+
+      // --- Perform DFT on loaded signal and Plot to SignalFD ---
+      // Assume SignalTD.Count > 0 and FSEdit.Text is valid
+      samplingRateDFT := StrToFloat(FSEdit.Text);
+      DFT(tempSignalData, samplingRateDFT, freqAxis, magnitudeAxis);
+
+      // Assume SignalFD is assigned and DFT produced output
+      SignalFD.Clear;
+      for i := Low(freqAxis) to High(freqAxis) do
+      begin
+        SignalFD.AddXY(freqAxis[i], magnitudeAxis[i], '', clBlue);
+      end;
+      // --- End of DFT and Plotting ---
+    finally
+      CloseFile(textFileHandle);
+    end;
+  end;
+  // No 'else' for OpenDialog1.Execute cancellation, just does nothing
+  // No 'else' for OpenDialog1 not assigned
+end;
+
+procedure TForm17.LogMsg(const Msg: string);
+begin
+  LogBox.Items.Add(FormatDateTime('hh:nn:ss', Now) + ' - ' + Msg);
+  LogBox.ItemIndex := LogBox.Items.Count - 1;
+  Application.ProcessMessages;
+end;
+
+procedure TForm17.UpdateMotherWaveletPlot;
+var
+  i: Integer;
+  scaleParam, translationParam, w0: Double;
+  timeVal, valReal, valImag, valEnvNorm, expTerm, commonFactor: Double;
+  sqrt_scale, inv_sqrt_scale: Double;
+begin
+  w0 := StrToFloat(WaveletFEdit.Text);
+
+  scaleParam := ScaleTrackBar.Position;
+  translationParam := TranslationTrackBar.Position;
+
+  sqrt_scale := Sqrt(scaleParam);
+  inv_sqrt_scale := 1.0 / sqrt_scale;
+  commonFactor := inv_sqrt_scale * Self.FPi_pow_neg_0_25;
+
+  Wavelet1.Clear;
+  Wavelet2.Clear;
+  Wavelet3.Clear;
+
+  for i := 0 to MORLET_CHART_POINTS - 1 do
+  begin
+    timeVal := i;
+    valEnvNorm := (timeVal - translationParam) / scaleParam;
+    expTerm := Exp(-0.5 * Sqr(valEnvNorm));
+    valReal := commonFactor * expTerm * Cos(w0 * valEnvNorm);
+    valImag := commonFactor * expTerm * Sin(w0 * valEnvNorm);
+    Wavelet1.AddXY(timeVal, commonFactor * expTerm);
+    Wavelet2.AddXY(timeVal, valReal);
+    Wavelet3.AddXY(timeVal, valImag);
+  end;
+end;
+
+procedure TForm17.WaveletFEditChange(Sender: TObject);
+begin
+  UpdateMotherWaveletPlot;
+end;
+
+procedure TForm17.ScaleTrackBarChange(Sender: TObject);
+begin
+  Label7.Caption := 'Scale: ' + IntToStr(ScaleTrackBar.Position);
+  UpdateMotherWaveletPlot;
+end;
+
+procedure TForm17.TranslationTrackBarChange(Sender: TObject);
+begin
+  Label8.Caption := 'Translation: ' + IntToStr(TranslationTrackBar.Position);
+  UpdateMotherWaveletPlot;
+end;
+
+procedure TForm17.GenWaveletClick(Sender: TObject);
+begin
+    Label7.Visible := True;
+    Label8.Visible := True;
+    ScaleTrackBar.Visible := True;
+    TranslationTrackBar.Visible := True;
+    WaveletFEdit.Visible := True;
+end;
+
+procedure TForm17.GenSignalClickEvent(Sender: TObject);
+var
+  i: Integer;
+  numPoints, switchPoint: Integer;
+  freq1, freq2, samplingRateDFT: Double; // Added samplingRateDFT
+  signalValue: Double;
+  amp1, amp2: Double;
+  dt_norm: Double;
+  signalForDFT: TArray<Double>;    // Array to hold signal Y values for DFT
+  freqAxis, magnitudeAxis: TArray<Double>; // Output from DFT
+begin
+  LogMsg('GenSignalClickEvent triggered.');
+
+  numPoints := StrToInt(SignalNEdit.Text);
+  freq1 := StrToFloat(Signal1FEdit.Text);
+  freq2 := StrToFloat(Signal2FEdit.Text);
+  switchPoint := StrToInt(SignalSwitchEdit.Text);
+  samplingRateDFT := StrToFloat(FSEdit.Text); // Get sampling rate for DFT
+
+  SignalTD.Clear;
+  amp1 := 8.0;
+  amp2 := 15.0;
+
+  SetLength(signalForDFT, numPoints); // Prepare array for DFT input
+
+  for i := 0 to numPoints - 1 do
+  begin
+    if numPoints > 1 then
+      dt_norm := i / (numPoints - 1)
+    else
+      dt_norm := 0;
+
+    if i < switchPoint then
+      signalValue := amp1 * Sin(2 * Pi * freq1 * dt_norm)
+    else
+      signalValue := amp2 * Sin(2 * Pi * freq2 * dt_norm);
+
+    SignalTD.AddXY(i, signalValue);
+    signalForDFT[i] := signalValue; // Store Y value for DFT
+  end;
+  LogMsg(Format('Generated signal with %d points. F1=%.1f, F2=%.1f, Switch at %d.', [numPoints, freq1, freq2, switchPoint]));
+
+  // --- Perform DFT and Plot to SignalFD ---
+  if numPoints > 0 then
+  begin
+    LogMsg(Format('Performing DFT with sampling rate: %.2f Hz', [samplingRateDFT]));
+    DFT(signalForDFT, samplingRateDFT, freqAxis, magnitudeAxis);
+
+    if Assigned(SignalFD) then
+    begin
+      SignalFD.Clear;
+      if Length(freqAxis) > 0 then // Check if DFT produced output
+      begin
+        for i := Low(freqAxis) to High(freqAxis) do
+        begin
+          SignalFD.AddXY(freqAxis[i], magnitudeAxis[i], '', clRed); // Add to bar series
+        end;
+        LogMsg(Format('DFT plotted to SignalFD. %d frequency points.', [Length(freqAxis)]));
+      end
+      else
+      begin
+        LogMsg('DFT did not produce output to plot.');
+      end;
+    end
+    else
+    begin
+      LogMsg('SignalFD series not assigned. Cannot plot DFT.');
+    end;
+  end
+  else
+  begin
+    LogMsg('No points in generated signal to perform DFT.');
+    if Assigned(SignalFD) then SignalFD.Clear; // Clear previous DFT plot if any
+  end;
+  // --- End of DFT and Plotting ---
+end;
+
+procedure TForm17.RainbowColor(Value: Real; out R, G, B: Byte);
+begin
+  Value := EnsureRange(Value, 0, 1);
+  if Value < 0.14 then begin R := 128 - Round(128 * (Value / 0.14)); G := 0; B := 255; end
+  else if Value < 0.28 then begin R := 0; G := Round(255 * ((Value - 0.14) / 0.14)); B := 255; end
+  else if Value < 0.42 then begin R := 0; G := 255; B := 255 - Round(255 * ((Value - 0.28) / 0.14)); end
+  else if Value < 0.57 then begin R := Round(255 * ((Value - 0.42) / 0.15)); G := 255; B := 0; end
+  else if Value < 0.71 then begin R := 255; G := 255 - Round(127 * ((Value - 0.57) / 0.14)); B := 0; end
+  else if Value < 0.85 then begin R := 255; G := 128 - Round(128 * ((Value - 0.71) / 0.14)); B := 0; end
+  else begin R := 255 - Round(255 * ((Value - 0.85) / 0.15)); G := 0; B := 0; end;
+end;
+
+procedure TForm17.ButtonPerformCWTClick(Sender: TObject);
+begin
+  PerformCWTAndPlot;
+  Label9.Visible := True;
+  Label10.Visible := True;
+  MinLabel.Visible := True;
+  MaxLabel.Visible := True;
+end;
+
+procedure TForm17.PerformCWTAndPlot;
+var
+  signalData: TArray<Double>;
+  cwtre, cwtim, cwt_magnitude: TArray<TArray<Double>>;
+  i, j, k, signalLength: Integer;
+  samplingRate, signal_dt, cwt_w0: Double;
+  current_a, current_b, cwt_b_step: Double;
+  t_signal_time: Double;
+  arg, psi_re, psi_im, sum_re, sum_im: Double;
+  xMin, xMax: Double;
+  Bitmap: TBitmap;
+  Row: PRGBTripleArray;
+  scale_loop_idx, translation_loop_idx : Integer;
+  i_bmp, j_bmp: Integer;
+  i_cwt, j_cwt: Integer;
+  cwt_val: Double;
+begin
+  samplingRate := StrToFloat(FSEdit.Text);
+  signal_dt := 1.0 / samplingRate;
+
+  signalLength := SignalTD.Count; // Assumes SignalTD has been populated
+  SetLength(signalData, signalLength);
+  for i := 0 to signalLength - 1 do
+    signalData[i] := SignalTD.YValue[i];
+
+  SetLength(cwtre, CWT_COLUMN_COUNT, CWT_ROW_COUNT);
+  SetLength(cwtim, CWT_COLUMN_COUNT, CWT_ROW_COUNT);
+  SetLength(cwt_magnitude, CWT_COLUMN_COUNT, CWT_ROW_COUNT);
+
+  cwt_w0 := 2 * Pi * CWT_F0;
+  cwt_b_step := (signalLength - 1) * signal_dt / CWT_COLUMN_COUNT;
+
+  current_a := CWT_A_INITIAL;
+  for scale_loop_idx := 0 to CWT_ROW_COUNT - 1 do
+  begin
+    current_b := 0.0;
+    for translation_loop_idx := 0 to CWT_COLUMN_COUNT - 1 do
+    begin
+      sum_re := 0.0; sum_im := 0.0; t_signal_time := 0.0;
+      for k := 0 to signalLength - 1 do
+      begin
+        arg := (t_signal_time - current_b) / current_a;
+        psi_re := (1.0 / Sqrt(current_a)) * Self.FPi_pow_neg_0_25 * Exp(-0.5 * Sqr(arg)) * Cos(cwt_w0 * arg);
+        psi_im := (1.0 / Sqrt(current_a)) * Self.FPi_pow_neg_0_25 * Exp(-0.5 * Sqr(arg)) * Sin(cwt_w0 * arg);
+        sum_re := sum_re + signalData[k] * psi_re;
+        sum_im := sum_im + signalData[k] * psi_im;
+        t_signal_time := t_signal_time + signal_dt;
+      end;
+      cwtre[translation_loop_idx, scale_loop_idx] := sum_re;
+      cwtim[translation_loop_idx, scale_loop_idx] := sum_im;
+      cwt_magnitude[translation_loop_idx, scale_loop_idx] := Sqrt(Sqr(sum_re) + Sqr(sum_im));
+      current_b := current_b + cwt_b_step;
+    end;
+    current_a := current_a + CWT_A_INCREMENT;
+  end;
+
+  xMin := cwt_magnitude[0, 0]; xMax := cwt_magnitude[0, 0]; // Assumes CWT_COLUMN/ROW_COUNT > 0
+  for j := 0 to CWT_ROW_COUNT - 1 do
+    for i := 0 to CWT_COLUMN_COUNT - 1 do
+    begin
+      if cwt_magnitude[i, j] < xMin then xMin := cwt_magnitude[i, j];
+      if cwt_magnitude[i, j] > xMax then xMax := cwt_magnitude[i, j];
+    end;
+
+  Bitmap := TBitmap.Create;
+  try
+    Bitmap.Width := HEATMAP_BITMAP_WIDTH; Bitmap.Height := HEATMAP_BITMAP_HEIGHT;
+    Bitmap.PixelFormat := pf24bit;
+    for j_bmp := 0 to Bitmap.Height - 1 do
+    begin
+      Row := Bitmap.ScanLine[j_bmp];
+      j_cwt := Round(j_bmp * (CWT_ROW_COUNT - 1) / (Bitmap.Height - 1));
+      j_cwt := Max(0, Min(j_cwt, CWT_ROW_COUNT - 1));
+      for i_bmp := 0 to Bitmap.Width - 1 do
+      begin
+        i_cwt := Round(i_bmp * (CWT_COLUMN_COUNT - 1) / (Bitmap.Width - 1));
+        i_cwt := Max(0, Min(i_cwt, CWT_COLUMN_COUNT - 1));
+        cwt_val := cwt_magnitude[i_cwt, j_cwt];
+        RainbowColor((cwt_val - xMin) / (xMax - xMin), Row[i_bmp].rgbtRed, Row[i_bmp].rgbtGreen, Row[i_bmp].rgbtBlue);
+      end;
+    end;
+    HeatMapImage.Picture.Graphic := Bitmap;
+    HeatMapImage.Width := HEATMAP_BITMAP_WIDTH;
+    HeatMapImage.Height := HEATMAP_BITMAP_HEIGHT;
+    HeatMapImage.Stretch := False;
+  finally Bitmap.Free; end;
+
+  Bitmap := TBitmap.Create;
+  try
+    Bitmap.Width := SCALEIMAGE_BITMAP_WIDTH; Bitmap.Height := SCALEIMAGE_BITMAP_HEIGHT;
+    Bitmap.PixelFormat := pf24bit;
+    for j := 0 to Bitmap.Height - 1 do
+    begin
+      Row := Bitmap.ScanLine[j];
+      RainbowColor((Bitmap.Height - 1 - j) / Max(1, (Bitmap.Height - 1)), Row[0].rgbtRed, Row[0].rgbtGreen, Row[0].rgbtBlue);
+      for i := 1 to Bitmap.Width - 1 do Row[i] := Row[0];
+    end;
+    ScaleImage.Picture.Graphic := Bitmap;
+    ScaleImage.Width := SCALEIMAGE_BITMAP_WIDTH; ScaleImage.Height := SCALEIMAGE_BITMAP_HEIGHT;
+    ScaleImage.Stretch := False;
+  finally Bitmap.Free; end;
+
+  MinLabel.Caption := Format('%.2f', [xMin]);
+  MaxLabel.Caption := Format('%.2f', [xMax]);
+end;
+
+procedure TForm17.DFT(const inputdft: TArray<Double>; sampleratedft: Double; out freqAxisdft, magnitudeAxisDFT: TArray<Double>);
+var
+  N, k, i: Integer; Re, Im, Angle, resolution, Mag: Double; maxindex: Integer;
+begin
+  N := Length(inputdft);
+  if N = 0 then // Keep this basic check for DFT robustness
+  begin
+    SetLength(freqAxisdft, 0);
+    SetLength(magnitudeAxisDFT, 0);
+    LogMsg('DFT Error: Input signal is empty.'); // Minimal log for critical DFT failure
+    Exit;
+  end;
+  maxindex := N div 2;
+  SetLength(freqAxisdft, maxindex + 1); SetLength(magnitudeAxisDFT, maxindex + 1);
+  resolution := sampleratedft / N; // N > 0 is guaranteed by the check above
+  for k := 0 to maxindex do
+  begin
+    Re := 0.0; Im := 0.0;
+    for i := Low(inputdft) to High(inputdft) do
+    begin Angle := 2.0 * PI * k * i / N; Re := Re + inputdft[i] * Cos(Angle); Im := Im - inputdft[i] * Sin(Angle); end;
+    Mag := Sqrt(Sqr(Re) + Sqr(Im));
+    if (k = 0) or ( (N mod 2 = 0) and (k = maxindex) ) then magnitudeAxisDFT[k] := Mag / N
+    else magnitudeAxisDFT[k] := 2.0 * Mag / N;
+    freqAxisdft[k] := k * resolution;
+  end;
+end;
+
+end.
